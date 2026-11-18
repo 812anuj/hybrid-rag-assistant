@@ -1,0 +1,18 @@
+# Secrets
+.env
+.env.*
+
+# Virtual environment
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# ChromaDB database
+data/chroma_db/
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+notes.txt
