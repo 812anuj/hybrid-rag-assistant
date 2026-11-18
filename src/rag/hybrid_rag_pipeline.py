@@ -7,18 +7,21 @@ from groq import Groq
 
 from sentence_transformers import SentenceTransformer, CrossEncoder
 from rank_bm25 import BM25Okapi
-
+from .ingestion import ingest_documents
 from .rag_prompt import create_prompt
 
 # 1. Connect to ChromaDB
 client_db = chromadb.PersistentClient(path="./data/chroma_db")
-collection = client_db.get_collection(name="cat_prep")
+
+collection = client_db.get_or_create_collection(name="cat_prep")
 print("Total stored chunks:", collection.count())
 
 # 2. Load embedding model
 embedding_model = SentenceTransformer(
     "all-MiniLM-L6-v2"
 )
+
+ingest_documents(collection, embedding_model)
 
 # 3. Load Cross-Encoder model
 cross_encoder = CrossEncoder(

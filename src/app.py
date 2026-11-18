@@ -1,5 +1,14 @@
-from rag.hybrid_rag_pipeline import get_rag_response
+import os
 import streamlit as st
+
+# Load API key from Streamlit Cloud Secrets
+try:
+    os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
+except (KeyError, FileNotFoundError):
+    pass
+
+from rag.hybrid_rag_pipeline import get_rag_response
+
 #  1. Configure the web application
 st.set_page_config(
     page_title="Hybrid RAG Assistant",
