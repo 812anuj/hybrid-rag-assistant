@@ -1,3 +1,4 @@
+
 import os
 import re
 import chromadb
@@ -7,28 +8,24 @@ from groq import Groq
 
 from sentence_transformers import SentenceTransformer, CrossEncoder
 from rank_bm25 import BM25Okapi
-from .ingestion import ingest_documents
+
+from .ingestion import ingest_uploaded_pdfs
 from .rag_prompt import create_prompt
+
 
 # 1. Connect to ChromaDB
 client_db = chromadb.PersistentClient(path="./data/chroma_db")
 
-collection = client_db.get_or_create_collection(name="cat_prep")
-print("Total stored chunks:", collection.count())
 
-# 2. Load embedding model
-embedding_model = SentenceTransformer(
-    "all-MiniLM-L6-v2"
-)
+# 2. Load AI models
+embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
-ingest_documents(collection, embedding_model)
-
-# 3. Load Cross-Encoder model
 cross_encoder = CrossEncoder(
     "cross-encoder/ms-marco-MiniLM-L-6-v2"
 )
 
-# 4. Connect to Groq
+
+# 3. Connect to Groq
 load_dotenv()
 
 api_key = os.getenv("GROQ_API_KEY")
@@ -38,151 +35,147 @@ if not api_key:
 
 groq_client = Groq(api_key=api_key)
 
-# 8. Get all documents from ChromaDB
-all_data = collection.get(
-    include=["documents", "metadatas"]
-)
 
-documents = all_data["documents"]
-metadatas = all_data["metadatas"]
-ids = all_data["ids"]
+# 4. Create a separate collection for each session
+def get_session_collection(session_id):
 
-# 9. Tokenize all documents
+    collection_name = f"session_{session_id}"
+
+    return client_db.get_or_create_collection(
+        name=collection_name
+    )
+
+
+# 5. Process uploaded PDFs
+def process_uploaded_pdfs(uploaded_files, collection):
+
+    # Remove previously uploaded documents from this session
+    existing_ids = collection.get()["ids"]
+
+    if existing_ids:
+        collection.delete(ids=existing_ids)
+
+    return ingest_uploaded_pdfs(
+        uploaded_files,
+        collection,
+        embedding_model
+    )
+
+
+# 6. Tokenize text for BM25
 def tokenize(text):
+
     return re.findall(r"\b\w+\b", text.lower())
 
-tokenized_documents = [
-    tokenize(document)
-    for document in documents
-]
 
-# 10. Create BM25 search engine
-bm25 = BM25Okapi(tokenized_documents)
+# 7. Hybrid RAG response
+def get_rag_response(question, collection):
 
-# 5. Create reusable RAG function
-def get_rag_response(question):
-    # 6. Convert question into embedding
-    query_embedding = embedding_model.encode(question)
-
-    # 7. Perform semantic search
-    semantic_results = collection.query(
-        query_embeddings=[query_embedding.tolist()],
-        n_results=10,
+    # Get documents from this session's collection
+    all_data = collection.get(
         include=["documents", "metadatas"]
     )
 
-    # Extract semantic result IDs
+    documents = all_data["documents"]
+    ids = all_data["ids"]
+
+    if not documents:
+        return "Please upload and process PDF documents first."
+
+    # Create document ID lookup
+    document_lookup = dict(zip(ids, documents))
+
+    # 8. Semantic search
+    query_embedding = embedding_model.encode(question)
+
+    semantic_results = collection.query(
+        query_embeddings=[query_embedding.tolist()],
+        n_results=min(10, len(documents)),
+        include=["documents", "metadatas"]
+    )
+
     semantic_ids = semantic_results["ids"][0]
 
-    # 11. Search using the question
+    # 9. BM25 search
+    tokenized_documents = [
+        tokenize(document)
+        for document in documents
+    ]
+
+    bm25 = BM25Okapi(tokenized_documents)
+
     query_tokens = tokenize(question)
 
     bm25_scores = bm25.get_scores(query_tokens)
 
-    # 12. Get top 10 BM25 results
     bm25_indices = sorted(
         range(len(bm25_scores)),
         key=lambda i: bm25_scores[i],
         reverse=True
     )[:10]
 
-    # Extract BM25 result IDs
     bm25_ids = [
         ids[index]
         for index in bm25_indices
     ]
 
-    # 13. Combine results using Reciprocal Rank Fusion
-
+    # 10. Reciprocal Rank Fusion
     rrf_scores = {}
 
     k = 60
 
-    # Process semantic search results
     for rank, document_id in enumerate(semantic_ids, start=1):
 
-        score = 1 / (k + rank)
+        rrf_scores[document_id] = (
+            rrf_scores.get(document_id, 0) + 1 / (k + rank)
+        )
 
-        if document_id not in rrf_scores:
-            rrf_scores[document_id] = 0
-
-        rrf_scores[document_id] += score
-
-
-    # Process BM25 search results
     for rank, document_id in enumerate(bm25_ids, start=1):
 
-        score = 1 / (k + rank)
+        rrf_scores[document_id] = (
+            rrf_scores.get(document_id, 0) + 1 / (k + rank)
+        )
 
-        if document_id not in rrf_scores:
-            rrf_scores[document_id] = 0
-
-        rrf_scores[document_id] += score
-
-
-    # Sort documents by RRF score
     ranked_results = sorted(
         rrf_scores.items(),
         key=lambda item: item[1],
         reverse=True
     )
 
-    # 14. Select top candidates for Cross-Encoder
+    # 11. CrossEncoder reranking
     top_candidates = ranked_results[:16]
 
-    # Prepare question-document pairs
-    pairs = []
+    pairs = [
+        (question, document_lookup[document_id])
+        for document_id, score in top_candidates
+    ]
 
-    for document_id, rrf_score in top_candidates:
-
-        index = ids.index(document_id)
-
-        document_text = documents[index]
-
-        pairs.append((question, document_text))
-
-
-    # 15. Calculate Cross-Encoder scores
     cross_scores = cross_encoder.predict(pairs)
 
-    # 16. Combine document IDs and Cross-Encoder scores
-    reranked_results = list(zip(
-        [document_id for document_id, score in top_candidates],
-        cross_scores
-    ))
-
-    # 17. Sort by Cross-Encoder scores
     reranked_results = sorted(
-        reranked_results,
+        zip(
+            [document_id for document_id, score in top_candidates],
+            cross_scores
+        ),
         key=lambda item: item[1],
         reverse=True
     )
 
-    # 19. Select final documents
+    # 12. Select final documents
     final_results = reranked_results[:10]
 
-    # 20. Extract final document IDs
-    final_ids = [
-        document_id
+    final_documents = [
+        document_lookup[document_id]
         for document_id, score in final_results
     ]
 
-    # 21. Get final document texts
-    final_documents = []
-
-    for document_id in final_ids:
-
-        index = ids.index(document_id)
-
-        final_documents.append(documents[index])
-
-    # 22. Combine final documents into context
+    # 13. Create context
     context = "\n\n".join(final_documents)
 
-    # 23. Create RAG prompt
+    # 14. Create prompt
     prompt = create_prompt(question, context)
 
-    # 24. Send prompt to Groq
+    # 15. Generate answer using Groq
     response = groq_client.chat.completions.create(
         model="openai/gpt-oss-20b",
         messages=[
@@ -190,7 +183,4 @@ def get_rag_response(question):
         ]
     )
 
-    # 25. Extract answer
-    answer = response.choices[0].message.content
-
-    return answer
+    return response.choices[0].message.content

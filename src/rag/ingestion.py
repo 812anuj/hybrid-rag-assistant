@@ -1,3 +1,5 @@
+import uuid
+
 
 from pathlib import Path
 
@@ -99,3 +101,63 @@ def ingest_documents(collection, embedding_model):
 
     print("Successfully stored documents!")
     print("Total stored chunks:", collection.count())
+
+
+
+def ingest_uploaded_pdfs(uploaded_files, collection, embedding_model):
+
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=500,
+        chunk_overlap=100,
+        length_function=len,
+        separators=["\n\n", "\n", " ", ""]
+    )
+
+    all_chunks = []
+
+    for uploaded_file in uploaded_files:
+
+        reader = PdfReader(uploaded_file)
+
+        for page_number, page in enumerate(reader.pages, start=1):
+
+            text = page.extract_text() or ""
+
+            if not text.strip():
+                continue
+
+            chunks = text_splitter.split_text(text)
+
+            for chunk_number, chunk in enumerate(chunks, start=1):
+
+                all_chunks.append({
+                    "content": chunk,
+                    "metadata": {
+                        "source": uploaded_file.name,
+                        "page": page_number,
+                        "doc_type": "pdf",
+                        "chunk_id": (
+                            f"{uuid.uuid4().hex}_"
+                            f"p{page_number}_c{chunk_number}"
+                        )
+                    }
+                })
+
+    if not all_chunks:
+        raise ValueError("No readable text found in uploaded PDFs.")
+
+    chunk_texts = [item["content"] for item in all_chunks]
+
+    embeddings = embedding_model.encode(
+        chunk_texts,
+        show_progress_bar=False
+    )
+
+    collection.upsert(
+        ids=[item["metadata"]["chunk_id"] for item in all_chunks],
+        documents=chunk_texts,
+        metadatas=[item["metadata"] for item in all_chunks],
+        embeddings=embeddings.tolist()
+    )
+
+    return len(all_chunks)

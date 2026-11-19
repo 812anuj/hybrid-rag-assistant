@@ -1,4 +1,6 @@
+
 import os
+import uuid
 import streamlit as st
 
 # Load API key from Streamlit Cloud Secrets
@@ -7,47 +9,108 @@ try:
 except (KeyError, FileNotFoundError):
     pass
 
-from rag.hybrid_rag_pipeline import get_rag_response
+from rag.hybrid_rag_pipeline import (
+    get_rag_response,
+    get_session_collection,
+    process_uploaded_pdfs
+)
 
-#  1. Configure the web application
+
+# 1. Configure application
 st.set_page_config(
     page_title="Hybrid RAG Assistant",
     page_icon="🤖",
     layout="wide"
 )
 
-# 2. Display the application title
 st.title("🤖 Hybrid RAG Assistant")
 
-# 3. Display a short description
 st.write(
-    "Ask questions about your documents "
-    "and get AI-powered answers."
+    "Upload your own PDF documents "
+    "and ask questions about them."
 )
 
 
-# 4. Create a question input box
-question = st.text_input(
-    "Enter your question:",
-    placeholder="Example: Who published this book?"
+# 2. Create a unique session ID
+if "session_id" not in st.session_state:
+    st.session_state.session_id = uuid.uuid4().hex
+
+
+# 3. Get this session's private collection
+collection = get_session_collection(
+    st.session_state.session_id
 )
 
-# 5. Create a Search button
-search_button = st.button("Search")
 
-# 6. Run the RAG pipeline when Search is clicked
-if search_button:
+# 4. Upload PDFs
+st.subheader("Upload your PDF documents")
 
-    if question:
+uploaded_files = st.file_uploader(
+    "Choose PDF files",
+    type=["pdf"],
+    accept_multiple_files=True
+)
 
-        with st.spinner("Searching documents and generating answer..."):
 
-            answer = get_rag_response(question)
+# 5. Process uploaded PDFs
+if st.button("Process PDFs"):
 
-        st.subheader("AI Answer")
-        st.write(answer)
+    if uploaded_files:
+
+        try:
+            with st.spinner("Processing your PDF documents..."):
+
+                total_chunks = process_uploaded_pdfs(
+                    uploaded_files,
+                    collection
+                )
+
+            st.success(
+                f"Successfully processed {len(uploaded_files)} PDF(s) "
+                f"and stored {total_chunks} chunks!"
+            )
+
+        except Exception as error:
+            st.error(f"PDF processing failed: {error}")
 
     else:
+        st.warning("Please upload at least one PDF.")
+
+
+# 6. Display document count
+st.write("Stored document chunks:", collection.count())
+
+
+# 7. Ask questions
+st.subheader("Ask your documents")
+
+question = st.text_input(
+    "Enter your question:",
+    placeholder="Ask something about your uploaded PDFs..."
+)
+
+
+# 8. Search
+if st.button("Search"):
+
+    if not question.strip():
         st.warning("Please enter a question.")
 
+    elif collection.count() == 0:
+        st.warning("Please upload and process PDFs first.")
 
+    else:
+
+        with st.spinner("Searching and generating answer..."):
+
+            try:
+                answer = get_rag_response(
+                    question,
+                    collection
+                )
+
+                st.subheader("AI Answer")
+                st.write(answer)
+
+            except Exception as error:
+                st.error(f"Something went wrong: {error}")
